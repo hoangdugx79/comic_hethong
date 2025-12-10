@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  comic-to-video:
+    build: .
+    container_name: comic-to-video-app
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - NEXT_PUBLIC_API_URL=https://anclick.id.vn
+      - SERVER_DOMAIN=https://anclick.id.vn
+    volumes:
+      - ./public/downloads:/app/public/downloads:ro
+      - ./music_cache:/app/music_cache
+      - ./users.json:/app/users.json
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/worker-status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  nginx:
+    image: nginx:alpine
+    container_name: comic-to-video-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./public:/app/public:ro
+      - ./ssl:/etc/nginx/ssl:ro  # Nếu có SSL cert
+    depends_on:
+      - comic-to-video
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
