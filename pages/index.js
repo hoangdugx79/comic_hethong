@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Head from 'next/head';
 
 const MUSIC_LIBRARY = [
@@ -39,6 +39,7 @@ export default function Home() {
   const [images, setImages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [videoLoading, setVideoLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   
@@ -57,6 +58,8 @@ export default function Home() {
   
   const [authData, setAuthData] = useState({ username: '', password: '', confirmPass: '' });
   const [authStatus, setAuthStatus] = useState({ loading: false, error: '', success: '' });
+  const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
 
   // --- EFFECT: CHECK LOGIN ---
   useEffect(() => {
@@ -81,6 +84,86 @@ export default function Home() {
       setAuthStatus({ loading: false, error: '', success: '' });
       setAuthData({ username: '', password: '', confirmPass: '' });
       setShowAuthModal(true);
+  };
+
+  const triggerUploadPicker = (mode = 'files') => {
+    if (!token) {
+        openAuthModal('login');
+        setError('Vui long dang nhap de tai anh tu may tinh.');
+        return;
+    }
+    const pickerRef = mode === 'folder' ? folderInputRef.current : fileInputRef.current;
+    if (pickerRef) pickerRef.click();
+  };
+
+  const handleUploadInputChange = (event) => {
+    const files = event.target.files;
+    uploadImagesFromDevice(files);
+    event.target.value = '';
+  };
+
+  const uploadImagesFromDevice = async (fileList) => {
+    if (!fileList || fileList.length === 0) return;
+    if (!token) {
+        openAuthModal('login');
+        setError('Vui long dang nhap de tai anh tu may tinh.');
+        return;
+    }
+
+    const filesArray = Array
+      .from(fileList)
+      .filter(file => {
+        if ((file.type || '').startsWith('image/')) return true;
+        return /\.(png|jpe?g|webp|gif|bmp)$/i.test(file.name || '');
+      });
+
+    if (filesArray.length === 0) {
+      setError('Khong co hinh hop le duoc chon.');
+      return;
+    }
+
+    const sortedFiles = filesArray.sort((a, b) => {
+      const pathA = a.webkitRelativePath || a.name;
+      const pathB = b.webkitRelativePath || b.name;
+      return pathA.localeCompare(pathB, undefined, { numeric: true, sensitivity: 'base' });
+    });
+
+    setUploading(true);
+    setError('');
+    setSuccessMsg('');
+
+    try {
+      const formData = new FormData();
+      sortedFiles.forEach(file => formData.append('images', file, file.name));
+
+      const response = await fetch('/api/upload-images', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: formData
+      });
+
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (_) {}
+
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+            handleLogout();
+        }
+        throw new Error(data.error || 'Tai anh that bai.');
+      }
+
+      if (Array.isArray(data.images) && data.images.length > 0) {
+        setImages(prev => [...prev, ...data.images]);
+      }
+      const addedCount = data.count || (data.images ? data.images.length : sortedFiles.length);
+      setSuccessMsg(`Da tai ${addedCount} hinh tu may tinh thanh cong!`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setUploading(false);
+    }
   };
 
   // --- LOGIC 1: Fetch Images (Updated with Token) ---
@@ -488,7 +571,63 @@ export default function Home() {
                 )}
               </div>
             </div>
-            
+            <div style={styles.uploadPanel}>
+              <div style={styles.uploadPanelHeader}>
+                <div>
+                  <h3 style={styles.uploadPanelTitle}>Upload tu may tinh</h3>
+                  <p style={styles.uploadPanelSubtitle}>Chon tung anh hoac ca folder, he thong se giu dung thu tu.</p>
+                </div>
+                {uploading && (
+                  <div style={styles.uploadingBadge}>
+                    <span style={styles.spinnerSmall}></span>
+                    <span>Dang tai...</span>
+                  </div>
+                )}
+              </div>
+              <div style={styles.uploadButtons}>
+                <button
+                  type="button"
+                  onClick={() => triggerUploadPicker('files')}
+                  style={{ ...styles.btnGhost, ...(uploading ? styles.btnDisabled : {}) }}
+                  disabled={uploading}
+                  className="btn-hover-effect"
+                >
+                  Upload anh le
+                </button>
+                <button
+                  type="button"
+                  onClick={() => triggerUploadPicker('folder')}
+                  style={{ ...styles.btnGhostSecondary, ...(uploading ? styles.btnDisabled : {}) }}
+                  disabled={uploading}
+                  className="btn-hover-effect"
+                >
+                  Upload folder
+                </button>
+              </div>
+              <p style={styles.uploadHint}>
+                Ho tro PNG, JPG, JPEG, WEBP toi da 800 anh / luot. He thong se danh so page-0001, page-0002... de giu dung thu tu.
+              </p>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="image/*"
+              style={{ display: 'none' }}
+              onChange={handleUploadInputChange}
+            />
+            <input
+              ref={folderInputRef}
+              type="file"
+              multiple
+              accept="image/*"
+              style={{ display: 'none' }}
+              webkitdirectory="true"
+              mozdirectory="true"
+              directory="true"
+              onChange={handleUploadInputChange}
+            />
+
             {/* Status Messages */}
             {error && (
               <div style={styles.alertError}>
@@ -908,6 +1047,79 @@ const styles = {
   actionButtons: {
     display: 'flex',
     gap: '12px'
+  },
+  uploadPanel: {
+    marginTop: '24px',
+    border: '1px dashed #cbd5f5',
+    borderRadius: 'var(--radius-md)',
+    padding: '20px',
+    background: '#f8fafc'
+  },
+  uploadPanelHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '16px',
+    marginBottom: '16px'
+  },
+  uploadPanelTitle: {
+    margin: 0,
+    fontSize: '16px',
+    fontWeight: 600,
+    color: '#1e293b'
+  },
+  uploadPanelSubtitle: {
+    margin: '4px 0 0 0',
+    fontSize: '13px',
+    color: '#64748b'
+  },
+  uploadButtons: {
+    display: 'flex',
+    gap: '12px',
+    flexWrap: 'wrap'
+  },
+  btnGhost: {
+    background: '#e0f2fe',
+    color: '#0369a1',
+    border: '1px solid #bae6fd',
+    padding: '0 20px',
+    height: '46px',
+    borderRadius: 'var(--radius-md)',
+    fontSize: '14px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px'
+  },
+  btnGhostSecondary: {
+    background: '#ede9fe',
+    color: '#5b21b6',
+    border: '1px solid #ddd6fe',
+    padding: '0 20px',
+    height: '46px',
+    borderRadius: 'var(--radius-md)',
+    fontSize: '14px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px'
+  },
+  uploadHint: {
+    margin: '12px 0 0 0',
+    fontSize: '12px',
+    color: '#64748b'
+  },
+  uploadingBadge: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    fontSize: '13px',
+    color: '#475569',
+    background: '#e2e8f0',
+    padding: '6px 12px',
+    borderRadius: '999px'
   },
   btnPrimary: {
     background: 'linear-gradient(135deg, #4f46e5 0%, #6366f1 100%)',

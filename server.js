@@ -14,6 +14,8 @@ const crypto = require('crypto');
 const http = require('http');
 const { exec } = require('child_process');
 const os = require('os');
+const multer = require('multer');
+
 
 sharp.cache(false);
 
@@ -39,6 +41,45 @@ fs.ensureFile(USERS_FILE).then(() => {
 // Ensure public/downloads for pre-built worker
 const DOWNLOADS_DIR = path.join(__dirname, 'public', 'downloads');
 fs.ensureDirSync(DOWNLOADS_DIR);
+
+const UPLOADS_DIR = path.join(__dirname, 'public', 'uploads');
+fs.ensureDirSync(UPLOADS_DIR);
+
+const sanitizeFilename = (name) => {
+  return name.replace(/[^a-zA-Z0-9-_]/g, '').substring(0, 80) || 'image';
+};
+
+const uploadStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const destPath = req.uploadBatchDir || UPLOADS_DIR;
+    cb(null, destPath);
+  },
+  filename: (req, file, cb) => {
+    req.uploadCounter = (req.uploadCounter || 0) + 1;
+    const parsed = path.parse(file.originalname || '');
+    const safeBase = sanitizeFilename(parsed.name || 'page');
+    const ext = (parsed.ext && parsed.ext.length <= 6 ? parsed.ext : '.jpg') || '.jpg';
+    const seq = String(req.uploadCounter).padStart(4, '0');
+    cb(null, `${seq}-${safeBase}${ext.toLowerCase()}`);
+  }
+});
+
+const uploadFileFilter = (req, file, cb) => {
+  if (file.mimetype && file.mimetype.startsWith('image/')) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only image files are allowed.'), false);
+  }
+};
+
+const upload = multer({
+  storage: uploadStorage,
+  fileFilter: uploadFileFilter,
+  limits: {
+    fileSize: 25 * 1024 * 1024,
+    files: 800
+  }
+});
 
 // ============ MUSIC LIBRARY ============
 const MANGA_MUSIC_LIBRARY = [
@@ -99,6 +140,23 @@ const getLocalExternalIP = () => {
   return 'localhost';
 };
 
+const prepareUploadDir = async (req, res, next) => {
+  try {
+    const userFolder = req.user?.id || 'guest';
+    const batchId = uniqueSlug();
+    const batchDir = path.join(UPLOADS_DIR, userFolder, batchId);
+
+    await fs.ensureDir(batchDir);
+
+    req.uploadUserFolder = userFolder;
+    req.uploadBatchId = batchId;
+    req.uploadBatchDir = batchDir;
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
 const requireUserAuth = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -148,6 +206,7 @@ app.prepare().then(() => {
   server.use(express.json({ limit: '500mb' }));
   server.use(express.raw({ type: 'video/mp4', limit: '500mb' }));
   server.use(cors());
+  server.use('/uploads', express.static(UPLOADS_DIR));
   
   const jobQueue = [];
   const pendingResponses = new Map();
@@ -300,6 +359,39 @@ app.prepare().then(() => {
     
     console.log(`Job ${jobId} added to queue by User: ${req.user.username}`);
   });
+
+  // ============ IMAGE UPLOAD API ============
+  const uploadImagesMiddleware = upload.array('images', 800);
+  server.post('/api/upload-images', requireUserAuth, prepareUploadDir, (req, res) => {
+    uploadImagesMiddleware(req, res, (err) => {
+      if (err) {
+        return res.status(400).json({ error: err.message || 'Tải ảnh thất bại' });
+      }
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ error: 'Khong co hinh nao duoc tai len.' });
+      }
+
+      const protoHeader = req.get('x-forwarded-proto') || req.protocol || 'http';
+      const hostHeader = req.get('x-forwarded-host') || req.get('host') || 'localhost';
+      const proto = protoHeader.split(',')[0];
+      const baseUrl = `${proto}://${hostHeader}`;
+
+      const responseImages = req.files.map((file, index) => {
+        const relativePath = `/uploads/${req.uploadUserFolder}/${req.uploadBatchId}/${file.filename}`.replace(/\\/g, '/');
+        return {
+          url: `${baseUrl}${relativePath}`,
+          alt: file.originalname || `Upload ${index + 1}`
+        };
+      });
+
+      res.json({
+        success: true,
+        uploadId: req.uploadBatchId,
+        count: responseImages.length,
+        images: responseImages
+      });
+    });
+  });
   
   // ============ SCRAPE API ============
   server.post('/api/fetch-images', requireUserAuth, async (req, res) => {
@@ -429,7 +521,15 @@ app.prepare().then(() => {
   // ============ WORKER DOWNLOAD API (FIXED) ============
   server.get('/api/download-worker', async (req, res) => {
     try {
-      const workerPath = path.join(__dirname, 'public', 'downloads', 'worker.exe');
+      const zipPath = path.join(__dirname, 'public', 'downloads', 'comic-worker-win64.zip');
+if (!fs.existsSync(zipPath)) {
+  return res.status(404).json({ 
+    error: 'Worker package not ready', 
+    hint: 'Build worker first: cd worker_build && npm run build:win' 
+  });
+}
+res.download(zipPath, 'comic-worker-win64.zip');
+
       
       // Check if pre-built worker exists
       if (!fs.existsSync(workerPath)) {
@@ -465,24 +565,25 @@ app.prepare().then(() => {
   });
   
   // Check worker availability
-  server.get('/api/worker-status', (req, res) => {
-    const workerPath = path.join(__dirname, 'public', 'downloads', 'worker.exe');
-    const exists = fs.existsSync(workerPath);
-    
-    if (exists) {
-      const stats = fs.statSync(workerPath);
-      res.json({
-        available: true,
-        size: (stats.size / (1024 * 1024)).toFixed(2) + ' MB',
-        path: '/api/download-worker'
-      });
-    } else {
-      res.json({
-        available: false,
-        message: 'Worker not built yet. Please build locally first.'
-      });
-    }
-  });
+server.get('/api/worker-status', (req, res) => {
+  const zipPath = path.join(__dirname, 'public', 'downloads', 'comic-worker-win64.zip');
+  const exists = fs.existsSync(zipPath);
+  if (exists) {
+    const stats = fs.statSync(zipPath);
+    res.json({ 
+      available: true, 
+      size: (stats.size / 1024 / 1024).toFixed(2) + ' MB',
+      format: 'ZIP + Node.js (Windows)',
+      path: '/api/download-worker'
+    });
+  } else {
+    res.json({ 
+      available: false, 
+      message: 'Worker ZIP not ready. Run: cd worker_release && zip -r ../public/downloads/comic-worker-win64.zip worker.js node_modules run-worker.bat README.txt'
+    });
+  }
+});
+
   
   // ============ NEXT.JS HANDLER ============
   server.all('*', (req, res) => handle(req, res));
